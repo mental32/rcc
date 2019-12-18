@@ -357,7 +357,7 @@ impl Token {
 mod tests {
     use super::Parser;
     use crate::data::prelude::*;
-    use crate::lex::Lexer;
+    use crate::lex::PreProcessor as Lexer;
 
     pub(crate) type ParseType = CompileResult<Locatable<Declaration>>;
     pub(crate) fn parse(input: &str) -> Option<ParseType> {
