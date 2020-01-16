@@ -137,6 +137,9 @@ pub enum CppError {
     #[error("{0} is never terminated")]
     UnterminatedDirective(&'static str),
 
+    #[error("expected expression for #if")]
+    EmptyExpression,
+
     #[doc(hidden)]
     #[error("internal error: do not construct nonexhaustive variants")]
     __Nonexhaustive,
