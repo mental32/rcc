@@ -397,3 +397,22 @@ impl From<ComparisonToken> for Token {
         Token::Comparison(a)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::*;
+    fn lexer(s: &str) -> Lexer {
+        Lexer::new("<integration-test>", s.chars(), false)
+    }
+    #[test]
+    fn assignment_display() {
+        let tokens = [
+            "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", ">>=", "<<=", "^=",
+        ];
+        for token in &tokens {
+            let mut lexer = lexer(token);
+            let first = lexer.next().unwrap().unwrap().data;
+            assert_eq!(&first.to_string(), *token);
+        }
+    }
+}

@@ -369,7 +369,6 @@ impl<'a> Lexer<'a> {
     }
     // should only be called at the end of a number. mostly error handling
     fn parse_exponent(&mut self, hex: bool, mut buf: String) -> Result<f64, String> {
-        use std::error::Error;
         let is_digit =
             |c: Option<char>| c.map_or(false, |c| c.is_digit(10) || c == '+' || c == '-');
         if hex {
@@ -395,7 +394,7 @@ impl<'a> Lexer<'a> {
             self.next_char();
         }
         let float = if hex {
-            hexf_parse::parse_hexf64(&buf, false).map_err(|err| err.description().into())
+            hexf_parse::parse_hexf64(&buf, false).map_err(|err| err.to_string())
         } else {
             buf.parse()
                 .map_err(|err: std::num::ParseFloatError| err.to_string())
@@ -861,9 +860,7 @@ impl<'a> Iterator for Lexer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CompileError, CompileResult, Error, LexError, Lexer, Literal, Locatable, Location, Token,
-    };
+    use super::*;
     use crate::intern::InternedStr;
 
     type LexType = CompileResult<Locatable<Token>>;
@@ -1158,5 +1155,28 @@ mod tests {
         assert_eq!(lex("12").unwrap().unwrap().location.span, (0..2).into());
         let span = lex_all("12 abc")[1].as_ref().unwrap().location.span;
         assert_eq!(span, (3..6).into());
+    }
+    #[test]
+    fn keywords() {
+        fn assert_keyword(
+            token: Option<Result<Locatable<Token>, CompileError>>,
+            expected: Keyword,
+        ) {
+            match token {
+                Some(Ok(Locatable {
+                    data: Token::Keyword(actual),
+                    ..
+                })) => assert_eq!(actual, expected),
+                Some(Ok(t)) => panic!("not a keyword: {}", t.data),
+                Some(Err(err)) => panic!("not a keyword: {}", err.data),
+                None => unreachable!(),
+            }
+        }
+        for keyword in KEYWORDS.values() {
+            // this one is still up in the air
+            if *keyword != Keyword::VaList {
+                assert_keyword(lex(&keyword.to_string()), *keyword);
+            }
+        }
     }
 }
