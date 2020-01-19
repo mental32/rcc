@@ -81,11 +81,21 @@ pub enum SemanticError {
     #[error("cannot have empty program")]
     EmptyProgram,
 
-    #[error("overflow in expresson: {0}")]
-    ConstOverflow(Expr),
+    #[error("{} overflow in expresson", if *(.is_positive) { "positive" } else { "negative" })]
+    ConstOverflow { is_positive: bool },
 
     #[error("not a constant expression: {0}")]
     NotConstant(Expr),
+
+    // String is the reason it couldn't be assigned
+    #[error("cannot assign to {0}")]
+    NotAssignable(String),
+
+    #[error("cannot take address of {0}")]
+    InvalidAddressOf(&'static str),
+
+    #[error("cannot divide by zero")]
+    DivideByZero,
 
     #[doc(hidden)]
     #[error("internal error: do not construct nonexhaustive variants")]

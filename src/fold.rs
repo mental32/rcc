@@ -1,5 +1,6 @@
 use crate::arch::CHAR_BIT;
 use crate::data::prelude::*;
+use std::ops;
 use Literal::*;
 
 macro_rules! fold_int_unary_op {
@@ -24,17 +25,27 @@ macro_rules! fold_int_bin_op {
     }
 }
 
-macro_rules! fold_scalar_bin_op {
-    ($op: tt) => {
-        |a: &Literal, b: &Literal, _| match (a, b) {
-            (Int(a), Int(b)) => Ok(Some(Int(a $op b))),
-            (UnsignedInt(a), UnsignedInt(b)) => Ok(Some(UnsignedInt(a $op b))),
-            (Float(a), Float(b)) => Ok(Some(Float(a $op b))),
-            (Char(a), Char(b)) => Ok(Some(Char(a $op b))),
-            // TODO: find a way to do this that allows `"hello" + 2 - 1`
-            //(Str(s), Int(i)) | (Int(i), Str(s)) => {
-            (_, _) => Ok(None),
+#[inline]
+fn fold_scalar_bin_op(
+    simple: fn(f64, f64) -> f64,
+    overflowing: fn(i64, i64) -> (i64, bool),
+    wrapping: fn(u64, u64) -> u64,
+) -> impl Fn(&Literal, &Literal, &Type) -> Result<Option<Literal>, Error> {
+    move |a: &Literal, b: &Literal, _ctype| match (a, b) {
+        (Int(a), Int(b)) => {
+            let (value, overflowed) = overflowing(*a, *b);
+            if overflowed {
+                Err(SemanticError::ConstOverflow {
+                    is_positive: value.is_negative(),
+                }
+                .into())
+            } else {
+                Ok(Some(Int(value)))
+            }
         }
+        (UnsignedInt(a), UnsignedInt(b)) => Ok(Some(UnsignedInt(wrapping(*a, *b)))),
+        (Float(a), Float(b)) => Ok(Some(Float(simple(*a, *b)))),
+        (_, _) => Ok(None),
     }
 }
 
@@ -148,45 +159,82 @@ impl Expr {
                 }
                 ExprType::Deref(Box::new(folded))
             }
-            ExprType::Add(left, right) => {
-                left.literal_bin_op(*right, &location, fold_scalar_bin_op!(+), ExprType::Add)?
-            }
+            ExprType::Add(left, right) => left.literal_bin_op(
+                *right,
+                &location,
+                fold_scalar_bin_op(
+                    <f64 as ops::Add<f64>>::add,
+                    i64::overflowing_add,
+                    u64::wrapping_add,
+                ),
+                ExprType::Add,
+            )?,
             ExprType::Sub(left, right) => left.literal_bin_op(
                 *right,
                 &location,
-                |a, b, ctype| match (a, b) {
-                    (Int(a), Int(b)) => Ok(Some(Int(a - b))),
-                    (UnsignedInt(a), UnsignedInt(b)) => Ok(Some(UnsignedInt(a.wrapping_sub(*b)))),
-                    #[allow(clippy::float_cmp)]
-                    (Float(a), Float(b)) => Ok(Some(Float(a - b))),
-                    (Char(a), Char(b)) => {
-                        if ctype.is_signed() {
-                            Ok(Some(Char(a - b)))
-                        } else {
-                            Ok(Some(Char(a.wrapping_sub(*b))))
-                        }
-                    }
-                    (_, _) => Ok(None),
-                },
+                fold_scalar_bin_op(
+                    <f64 as ops::Sub<f64>>::sub,
+                    i64::overflowing_sub,
+                    u64::wrapping_sub,
+                ),
                 ExprType::Sub,
             )?,
-            ExprType::Mul(left, right) => {
-                left.literal_bin_op(*right, &location, fold_scalar_bin_op!(*), ExprType::Mul)?
-            }
+            ExprType::Mul(left, right) => left.literal_bin_op(
+                *right,
+                &location,
+                fold_scalar_bin_op(
+                    <f64 as ops::Mul<f64>>::mul,
+                    i64::overflowing_mul,
+                    u64::wrapping_mul,
+                ),
+                ExprType::Mul,
+            )?,
             ExprType::Div(left, right) => {
                 let right = right.const_fold()?;
                 if right.is_zero() {
-                    semantic_err!("cannot divide by zero".into(), location,);
+                    return Err(location.error(SemanticError::DivideByZero));
                 }
-                left.literal_bin_op(right, &location, fold_scalar_bin_op!(/), ExprType::Div)?
+                left.literal_bin_op(
+                    right,
+                    &location,
+                    fold_scalar_bin_op(
+                        <f64 as ops::Div<f64>>::div,
+                        i64::overflowing_div,
+                        u64::wrapping_div,
+                    ),
+                    ExprType::Div,
+                )?
             }
-
             ExprType::Mod(left, right) => {
                 let right = right.const_fold()?;
                 if right.is_zero() {
-                    semantic_err!("cannot take remainder of division by zero".into(), location,);
+                    return Err(location.error(SemanticError::DivideByZero));
                 }
-                left.literal_bin_op(right, &location, fold_int_bin_op!(%), ExprType::Mod)?
+                left.literal_bin_op(
+                    right,
+                    &location,
+                    |a: &Literal, b: &Literal, _| match (a, b) {
+                        (Int(a), Int(b)) => {
+                            let (value, overflowed) = a.overflowing_rem(*b);
+
+                            if overflowed {
+                                Err(SemanticError::ConstOverflow {
+                                    is_positive: value.is_negative(),
+                                }
+                                .into())
+                            } else {
+                                Ok(Some(Int(value)))
+                            }
+                        }
+                        (UnsignedInt(a), UnsignedInt(b)) => {
+                            Ok(Some(UnsignedInt(a.wrapping_rem(*b))))
+                        }
+                        (Char(a), Char(0)) => Err(SemanticError::DivideByZero.into()),
+                        (Char(a), Char(b)) => Ok(Some(Char(a % b))),
+                        (_, _) => Ok(None),
+                    },
+                    ExprType::Mod,
+                )?
             }
             ExprType::Xor(left, right) => {
                 left.literal_bin_op(*right, &location, fold_int_bin_op!(^), ExprType::Xor)?
@@ -295,6 +343,11 @@ impl Expr {
             ..self
         })
     }
+    ///
+    /// fold_func return values:
+    /// `Ok(Some(_))`: Successfuly folded
+    /// `Ok(None)`: Non-folable expression
+    /// `Err(_)`: Error while folding
     fn literal_bin_op<F, C>(
         self,
         other: Expr,
@@ -303,14 +356,16 @@ impl Expr {
         constructor: C,
     ) -> CompileResult<ExprType>
     where
-        F: FnOnce(&Literal, &Literal, &Type) -> Result<Option<Literal>, String>,
+        F: FnOnce(&Literal, &Literal, &Type) -> Result<Option<Literal>, Error>,
         C: FnOnce(Box<Expr>, Box<Expr>) -> ExprType,
     {
         let (left, right) = (self.const_fold()?, other.const_fold()?);
-        let literal = match (&left.expr, &right.expr) {
+        let literal: Option<ExprType> = match (&left.expr, &right.expr) {
             (ExprType::Literal(left_token), ExprType::Literal(right_token)) => {
                 match fold_func(left_token, right_token, &left.ctype) {
-                    Err(data) => semantic_err!(data, *location),
+                    Err(err) => {
+                        return Err(CompileError::new(err, *location));
+                    }
                     Ok(token) => token.map(ExprType::Literal),
                 }
             }
@@ -488,5 +543,122 @@ fn shift_left(
         })
     } else {
         Ok(ExprType::Shift(Box::new(left), Box::new(right), false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::data::prelude::*;
+    use crate::parse::tests::parse_expr;
+
+    fn test_const_fold(s: &str) -> CompileResult<Expr> {
+        parse_expr(s).unwrap().const_fold()
+    }
+
+    // I will be including the test cases from https://github.com/jyn514/rcc/issues/38#issue-491407941
+    // as well as a working case for each operator
+
+    #[test]
+    fn test_addition() {
+        assert_eq!(
+            test_const_fold("3 + 4").unwrap().expr,
+            parse_expr("7").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("0x7fffffffffffffffL + 1").unwrap_err().data,
+            SemanticError::ConstOverflow { is_positive: true }.into()
+        );
+        assert_eq!(
+            test_const_fold("-0x7fffffffffffffffL + -2")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: false }.into()
+        );
+    }
+
+    #[test]
+    fn test_subtraction() {
+        assert_eq!(
+            test_const_fold("9 - 3").unwrap().expr,
+            parse_expr("6").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("-0x7fffffffffffffffL - 2")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: false }.into()
+        );
+        assert_eq!(
+            test_const_fold("0x7fffffffffffffffL - -1")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: true }.into()
+        );
+    }
+
+    #[test]
+    fn test_multiplication() {
+        assert_eq!(
+            test_const_fold("3 * 5").unwrap().expr,
+            parse_expr("15").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("0x7fffffffffffffffL * 2").unwrap_err().data,
+            SemanticError::ConstOverflow { is_positive: true }.into()
+        );
+        assert_eq!(
+            test_const_fold("(-0x7fffffffffffffffL - 1) * -1")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: true }.into()
+        );
+    }
+
+    #[test]
+    fn test_division() {
+        assert_eq!(
+            test_const_fold("6 / 3").unwrap().expr,
+            parse_expr("2").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("6 / -3").unwrap().expr,
+            test_const_fold("-2").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("1 / 0").unwrap_err().data,
+            SemanticError::DivideByZero.into()
+        );
+        assert_eq!(
+            test_const_fold("1 / (2 - 2)").unwrap_err().data,
+            SemanticError::DivideByZero.into()
+        );
+        assert_eq!(
+            test_const_fold("(-0x7fffffffffffffffL - 1) / -1")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: true }.into()
+        );
+    }
+
+    #[test]
+    fn test_modulo() {
+        assert_eq!(
+            test_const_fold("5 % 3").unwrap().expr,
+            parse_expr("2").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("-7 % 2").unwrap().expr,
+            test_const_fold("-1").unwrap().expr
+        );
+        assert_eq!(
+            test_const_fold("1%0").unwrap_err().data,
+            SemanticError::DivideByZero.into()
+        );
+        assert_eq!(
+            test_const_fold("(-0x7fffffffffffffffL - 1) % -1")
+                .unwrap_err()
+                .data,
+            SemanticError::ConstOverflow { is_positive: false }.into()
+        );
     }
 }

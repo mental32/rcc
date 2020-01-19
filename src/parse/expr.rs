@@ -109,11 +109,8 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
             }
         };
         let mut rval = self.assignment_expr()?.rval();
-        if !lval.lval {
-            self.semantic_err(
-                "expression is not assignable".to_string(),
-                assign_op.location,
-            );
+        if let Err(err) = lval.modifiable_lval() {
+            self.error_handler.push_back(assign_op.location.error(err));
             Ok(lval)
         } else {
             if rval.ctype != lval.ctype {
@@ -564,6 +561,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                 })
             }
             Some(op) if op.is_unary_operator() => {
+                use crate::data::StorageClass;
                 let Locatable { location, data: op } = self.next_token().unwrap();
                 let expr = self.cast_expr()?;
                 match op {
@@ -571,6 +569,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                     Token::Ampersand => match expr.expr {
                         // parse &*p as p
                         ExprType::Deref(inner) => Ok(*inner),
+                        ExprType::Id(ref sym) if sym.storage_class == StorageClass::Register => {
+                            self.error_handler.push_back(location.error(
+                                SemanticError::InvalidAddressOf(
+                                    "variable declared with `register`",
+                                ),
+                            ));
+                            Ok(expr)
+                        }
                         _ if expr.lval => Ok(Expr {
                             constexpr: false,
                             lval: false,
@@ -579,7 +585,9 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             expr: expr.expr,
                         }),
                         _ => {
-                            self.semantic_err("cannot take address of a value", location);
+                            self.error_handler.push_back(
+                                location.error(SemanticError::InvalidAddressOf("value")),
+                            );
                             Ok(expr)
                         }
                     },
@@ -1110,21 +1118,39 @@ impl Expr {
     /// "A modifiable lvalue is an lvalue that does not have array type,
     /// does not  have an incomplete type, does not have a const-qualified type,
     /// and if it is a structure or union, does not have any member with a const-qualified type"
-    fn is_modifiable_lval(&self) -> bool {
+    fn modifiable_lval(&self) -> Result<(), SemanticError> {
+        let err = |e| Err(SemanticError::NotAssignable(e));
+        // rval
         if !self.lval {
-            return false;
+            return err("rvalue".to_string());
         }
-        match &self.expr {
-            // p = 5;
-            ExprType::Id(sym) => !sym.qualifiers.c_const,
-            // *p = 1;
-            ExprType::Deref(_) => match &self.ctype {
-                Type::Pointer(_) => true,
-                _ => panic!("only pointers can be dereferenced"),
-            },
-            ExprType::Member(_, _) => true,
-            ExprType::Noop(inner) => inner.is_modifiable_lval(),
-            _ => unimplemented!("what's an lval but not a pointer or id? {}", self),
+        // incomplete type
+        if !self.ctype.is_complete() {
+            return err(format!("expression with incomplete type '{}'", self.ctype));
+        }
+        // const-qualified type
+        if let ExprType::Id(sym) = &self.expr {
+            if sym.qualifiers.c_const {
+                return err(format!("variable '{}' with `const` qualifier", sym.id));
+            }
+        }
+        match &self.ctype {
+            // array type
+            Type::Array(_, _) => err("array".to_string()),
+            // member with const-qualified type
+            Type::Struct(stype) | Type::Union(stype) => {
+                if stype
+                    .members()
+                    .iter()
+                    .map(|sym| sym.qualifiers.c_const)
+                    .any(|x| x)
+                {
+                    err("struct or union with `const` qualified member".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
         }
     }
     // ensure an expression has a value. convert
@@ -1336,15 +1362,8 @@ impl Expr {
         expr: Expr,
         location: Location,
     ) -> RecoverableResult<Expr, Locatable<SemanticError>> {
-        if !expr.is_modifiable_lval() {
-            return Err((
-                Locatable {
-                    location: expr.location,
-                    data: "expression is not assignable".to_string(),
-                }
-                .into(),
-                expr,
-            ));
+        if let Err(err) = expr.modifiable_lval() {
+            return Err((expr.location.with(err), expr));
         } else if !(expr.ctype.is_arithmetic() || expr.ctype.is_pointer()) {
             return Err((
                 Locatable {
@@ -1630,11 +1649,11 @@ impl Type {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::data::{prelude::*, types, Scope, StorageClass};
     use crate::intern::InternedStr;
     use crate::parse::tests::*;
-    fn parse_expr(input: &str) -> CompileResult<Expr> {
+    pub(crate) fn parse_expr(input: &str) -> CompileResult<Expr> {
         // because we're a child module of parse, we can skip straight to `expr()`
         let mut p = parser(input);
         let exp = p.expr();
