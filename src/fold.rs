@@ -229,6 +229,7 @@ impl Expr {
                         (UnsignedInt(a), UnsignedInt(b)) => {
                             Ok(Some(UnsignedInt(a.wrapping_rem(*b))))
                         }
+                        (Char(a), Char(0)) => Err(SemanticError::DivideByZero.into()),
                         (Char(a), Char(b)) => Ok(Some(Char(a % b))),
                         (_, _) => Ok(None),
                     },
